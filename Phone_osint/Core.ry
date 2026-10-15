@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Iterable
+
+import httpx
+from dotenv import load_dotenv
+
+from .models import PhoneReport, PluginResult
+from .plugins import ALL_PLUGINS
+from .plugins.base import Plugin
+
+load_dotenv()
+
+
+def _load_env() -> dict[str, str]:
+    keys = [
+        "HIBP_API_KEY",
+        "NUMVERIFY_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_CSE_ID",
+    ]
+    return {k: os.getenv(k, "") for k in keys}
+
+
+async def investigate(
+    raw: str,
+    *,
+    plugins: Iterable[type[Plugin]] | None = None,
+    concurrency: int = 4,
+    timeout: float = 20.0,
+) -> PhoneReport:
+    """
+    Прогоняет номер через все плагины.
+    Сначала выполняется phonenumbers (нужен e164), затем остальные параллельно.
+    """
+    env = _load_env()
+    report = PhoneReport(raw=raw)
+
+    plugin_classes = list(plugins) if plugins else list(ALL_PLUGINS)
+
+    # 1) Сначала локальная нормализация
+    normalizer_cls = next(
+        (p for p in plugin_classes if p.name == "phonenumbers"), None
+    )
+    if normalizer_cls:
+        async with httpx.AsyncClient() as client:
+            res = await normalizer_cls(env).run(report, client)
+            report.add(res)
+        plugin_classes = [p for p in plugin_classes if p is not normalizer_cls]
+
+    if not report.valid:
+        return report
+
+    # 2) Остальные — параллельно с семафором
+    sem = asyncio.Semaphore(concurrency)
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+
+        async def run_one(cls: type[Plugin]) -> PluginResult:
+            inst = cls(env)
+            if not inst.enabled():
+                return PluginResult(
+                    name=inst.name, status="skipped",
+                    error=f"missing {inst.requires_key}",
+                )
+            async with sem:
+                try:
+                    return await inst.run(report, client)
+                except Exception as e:
+                    return PluginResult(
+                        name=inst.name, status="error", error=str(e)
+                    )
+
+        results = await asyncio.gather(*(run_one(c) for c in plugin_classes))
+        for r in results:
+            report.add(r)
+
+    return report
