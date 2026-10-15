@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from jinja2 import Template
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from .models import PhoneReport
+
+
+def to_json(report: PhoneReport, *, indent: int = 2) -> str:
+    return json.dumps(report.to_dict(), ensure_ascii=False, indent=indent)
+
+
+def print_rich(report: PhoneReport) -> None:
+    console = Console()
+
+    head = Table.grid(padding=(0, 2))
+    head.add_column(style="bold cyan")
+    head.add_column()
+    head.add_row("Введено:", report.raw)
+    head.add_row("E.164:", report.e164 or "—")
+    head.add_row("Валиден:", "✅" if report.valid else "❌")
+    head.add_row("Страна:", report.country or "—")
+    head.add_row("Регион:", report.region or "—")
+    head.add_row("Оператор:", report.carrier or "—")
+    head.add_row("Тип:", report.number_type)
+    head.add_row("Таймзоны:", ", ".join(report.timezones) or "—")
+    console.print(Panel(head, title="📱 phone-osint", border_style="cyan"))
+
+    for r in report.results:
+        if r.name == "phonenumbers":
+            continue
+        color = {"ok": "green", "skipped": "yellow", "error": "red"}[r.status]
+        body = json.dumps(r.data, ensure_ascii=False, indent=2) if r.data else (r.error or "")
+        console.print(Panel(body or "—", title=f"[{color}]{r.name}[/] ({r.status})",
+                            border_style=color))
+
+
+_HTML_TEMPLATE = Template("""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<title>phone-osint — {{ r.raw }}</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#111}
+h1{font-size:1.4rem}
+table{border-collapse:collapse;width:100%;margin:1rem 0}
+td,th{border:1px solid #ddd;padding:.5rem;text-align:left;vertical-align:top}
+.status-ok{color:#0a0}.status-error{color:#c00}.status-skipped{color:#a80}
+pre{background:#f6f8fa;padding:.75rem;border-radius:6px;overflow:auto}
+footer{margin-top:2rem;color:#666;font-size:.85rem}
+</style></head><body>
+<h1>phone-osint: {{ r.raw }}</h1>
+<table>
+<tr><th>E.164</th><td>{{ r.e164 or "—" }}</td></tr>
+<tr><th>Валиден</th><td>{{ "да" if r.valid else "нет" }}</td></tr>
+<tr><th>Страна / регион</th><td>{{ r.country }} / {{ r.region }}</td></tr>
+<tr><th>Оператор</th><td>{{ r.carrier }}</td></tr>
+<tr><th>Тип</th><td>{{ r.number_type }}</td></tr>
+<tr><th>Таймзоны</th><td>{{ r.timezones | join(", ") }}</td></tr>
+</table>
+{% for p in r.results if p.name != "phonenumbers" %}
+<h2>{{ p.name }} <span class="status-{{ p.status }}">[{{ p.status }}]</span></h2>
+{% if p.error %}<p class="status-error">{{ p.error }}</p>{% endif %}
+{% if p.data %}<pre>{{ p.data | tojson(indent=2) }}</pre>{% endif %}
+{% endfor %}
+<footer>Сгенерировано phone-osint. Используйте только законно.</footer>
+</body></html>""")
+
+
+def to_html(report: PhoneReport) -> str:
+    return _HTML_TEMPLATE.render(r=report.to_dict())
+
+
+def save_html(report: PhoneReport, path: str | Path) -> Path:
+    p = Path(path)
+    p.write_text(to_html(report), encoding="utf-8")
+    return p
