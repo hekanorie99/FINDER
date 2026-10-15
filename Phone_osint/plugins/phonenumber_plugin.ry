@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+import httpx
+import phonenumbers
+from phonenumbers import geocoder, carrier, timezone
+
+from ..models import PhoneReport, PluginResult
+from .base import Plugin
+
+
+_NUMBER_TYPES = {
+    phonenumbers.PhoneNumberType.MOBILE: "mobile",
+    phonenumbers.PhoneNumberType.FIXED_LINE: "fixed",
+    phonenumbers.PhoneNumberType.FIXED_LINE_OR_MOBILE: "fixed_or_mobile",
+    phonenumbers.PhoneNumberType.TOLL_FREE: "toll_free",
+    phonenumbers.PhoneNumberType.PREMIUM_RATE: "premium_rate",
+    phonenumbers.PhoneNumberType.VOIP: "voip",
+    phonenumbers.PhoneNumberType.PERSONAL_NUMBER: "personal",
+    phonenumbers.PhoneNumberType.PAGER: "pager",
+    phonenumbers.PhoneNumberType.UAN: "uan",
+    phonenumbers.PhoneNumberType.VOICEMAIL: "voicemail",
+    phonenumbers.PhoneNumberType.UNKNOWN: "unknown",
+}
+
+
+class PhoneNumbersPlugin(Plugin):
+    """Локальный парсинг: оператор, регион, тип линии, таймзоны."""
+
+    name = "phonenumbers"
+
+    async def run(self, report: PhoneReport, client: httpx.AsyncClient) -> PluginResult:
+        try:
+            parsed = phonenumbers.parse(report.raw, "RU")
+            report.valid = phonenumbers.is_valid_number(parsed)
+            report.e164 = phonenumbers.format_number(
+                parsed, phonenumbers.PhoneNumberFormat.E164
+            )
+            report.country = geocoder.country_name_for_number(parsed, "ru") or ""
+            report.region = geocoder.description_for_number(parsed, "ru") or ""
+            report.carrier = carrier.name_for_number(parsed, "ru") or ""
+            report.timezones = list(timezone.time_zones_for_number(parsed))
+            report.number_type = _NUMBER_TYPES.get(
+                phonenumbers.number_type(parsed), "unknown"
+            )
+            return PluginResult(
+                name=self.name,
+                status="ok",
+                data={
+                    "e164": report.e164,
+                    "valid": report.valid,
+                    "country": report.country,
+                    "region": report.region,
+                    "carrier": report.carrier,
+                    "number_type": report.number_type,
+                    "timezones": report.timezones,
+                },
+            )
+        except Exception as e:
+            return PluginResult(name=self.name, status="error", error=str(e))
